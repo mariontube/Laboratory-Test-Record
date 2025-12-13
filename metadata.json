@@ -1,0 +1,7 @@
+{
+  "name": "LabVoice 实验助手",
+  "description": "基于 Gemini Live API 的智能语音实验记录工具，能够实时将语音转换为结构化的实验记录。",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
