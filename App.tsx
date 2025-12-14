@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Mic, Plus, History, Activity, FileSpreadsheet, AlertTriangle, ExternalLink, MessageSquareText } from 'lucide-react';
+import { Mic, Plus, History, Activity, FileSpreadsheet, AlertTriangle, ExternalLink, MessageSquareText, FlaskConical } from 'lucide-react';
 import { LogItem } from './components/LogItem';
 import { Visualizer } from './components/Visualizer';
 import { HistoryModal } from './components/HistoryModal';
@@ -26,7 +26,7 @@ const App: React.FC = () => {
   });
 
   const [isRecording, setIsRecording] = useState(false);
-  const [isConnecting, setIsConnecting] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false); // Used for "Connecting..." state
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   
   // Real-time transcription state
@@ -93,10 +93,8 @@ const App: React.FC = () => {
     }
   };
 
-  // Updated to support measurements array
   const handleNewLog = useCallback((data: { description: string; measurements: Omit<Measurement, 'id'>[]; type: string }) => {
     setExperiment(prev => {
-      // Convert incoming measurements to have IDs
       const measurementsWithIds: Measurement[] = data.measurements.map(m => ({
         ...m,
         id: crypto.randomUUID()
@@ -115,7 +113,6 @@ const App: React.FC = () => {
         logs: [...prev.logs, newLog]
       };
     });
-    // Clear transcription when a log is finalized/created
     setLiveTranscription('');
   }, []);
 
@@ -144,37 +141,56 @@ const App: React.FC = () => {
   };
 
   const handleConnectionStatus = useCallback((status: boolean) => {
-    setIsRecording(status);
-    setIsConnecting(false);
+    // This callback is less relevant in push-to-talk for "isRecording" state
+    // because we control that manually via press/release.
+    // However, we can use it to clear the "processing" spinner.
+    if (status) {
+      setIsProcessing(false); 
+    }
   }, []);
 
-  const toggleRecording = async () => {
-    setErrorMessage(null);
-    
-    if (isRecording) {
-      if (geminiServiceRef.current) {
-        await geminiServiceRef.current.disconnect();
-        geminiServiceRef.current = null;
-      }
-    } else {
-      if (isWeChatBrowser()) {
-        setErrorMessage("微信浏览器通常不支持麦克风权限。请点击右上角 ... 选择「在浏览器打开」以获得最佳体验。");
-      }
+  // --- Push to Talk Logic ---
 
-      setIsConnecting(true);
-      const service = new GeminiLiveService(handleNewLog, handleConnectionStatus, handleTranscription);
-      geminiServiceRef.current = service;
-      try {
-        await service.connect();
-      } catch (e) {
-        console.error("Error starting session", e);
-        setIsConnecting(false);
-        if (isWeChatBrowser()) {
-           setErrorMessage("连接失败：微信浏览器无法访问麦克风。请点击右上角选择「在浏览器打开」。");
-        } else {
-           setErrorMessage("无法连接麦克风或服务，请检查权限设置。");
-        }
-      }
+  const startRecording = async (e: React.TouchEvent | React.MouseEvent) => {
+    // Prevent default to stop context menus, text selection, etc.
+    // e.preventDefault(); // Note: Preventing default on touchstart might block scrolling if not careful, but for the button it's fine.
+    
+    if (isRecording || isProcessing) return;
+
+    setErrorMessage(null);
+    setIsRecording(true);
+    setIsProcessing(true); // Show spinner until connected or while initializing
+
+    if (isWeChatBrowser()) {
+       setErrorMessage("微信浏览器可能不兼容。建议点击右上角「在浏览器打开」。");
+    }
+
+    const service = new GeminiLiveService(handleNewLog, handleConnectionStatus, handleTranscription);
+    geminiServiceRef.current = service;
+
+    try {
+      await service.connect();
+      // Connection successful, isProcessing set to false by callback
+    } catch (e) {
+      console.error("Error starting session", e);
+      setIsRecording(false);
+      setIsProcessing(false);
+      setErrorMessage("麦克风连接失败，请检查权限。");
+    }
+  };
+
+  const stopRecording = async (e?: React.TouchEvent | React.MouseEvent | React.FocusEvent) => {
+    if (!isRecording) return;
+    
+    // Slight delay to ensure short utterances are caught? 
+    // No, immediate stop is usually better for UI responsiveness.
+    
+    setIsRecording(false);
+    setIsProcessing(false);
+
+    if (geminiServiceRef.current) {
+      await geminiServiceRef.current.disconnect();
+      geminiServiceRef.current = null;
     }
   };
 
@@ -187,8 +203,8 @@ const App: React.FC = () => {
     const newExp: Experiment = {
       id: crypto.randomUUID(),
       title: '实验记录 ' + new Date().toLocaleString('zh-CN'),
-      startTime: new Date().toISOString(),
       logs: [],
+      startTime: new Date().toISOString(),
       status: 'active'
     };
     setExperiment(newExp);
@@ -222,13 +238,9 @@ const App: React.FC = () => {
   const handleExportCSV = () => {
     const bom = '\uFEFF';
     const headers = "步骤序号,时间,类型,描述,数据标签,数值,单位\n";
-    
-    // Flatten logs because one log can have multiple measurements
     let rows = "";
     experiment.logs.forEach(log => {
-      // Clean text for CSV
       const desc = log.description.replace(/"/g, '""');
-      
       if (log.measurements && log.measurements.length > 0) {
          log.measurements.forEach(m => {
             rows += `${log.stepNumber},${log.timestamp},${log.type},"${desc}","${m.label}","${m.value}","${m.unit || ''}"\n`;
@@ -248,7 +260,7 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="fixed inset-0 w-full h-full bg-slate-50 flex flex-col font-sans text-slate-900">
+    <div className="fixed inset-0 w-full h-full bg-slate-50 flex flex-col font-sans text-slate-900 select-none">
       
       <HistoryModal 
         isOpen={isHistoryOpen}
@@ -322,7 +334,7 @@ const App: React.FC = () => {
             <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mb-6">
               <Mic className="w-8 h-8 text-slate-300" />
             </div>
-            <p className="font-medium">点击下方麦克风开始</p>
+            <p className="font-medium">长按下方按钮说话</p>
             <p className="text-xs mt-2 text-slate-300 max-w-[200px] text-center">
               语音识别已升级。我会自动提取如 "50ml", "37°C" 等关键数据并归类。
             </p>
@@ -366,18 +378,24 @@ const App: React.FC = () => {
              <span className="text-[10px] text-slate-400 font-medium uppercase mt-1">记录项</span>
            </div>
 
-           {/* Main Record Button */}
+           {/* Main Record Button - Push to Talk */}
            <div className="-mt-12 relative z-20">
              <button
-               onClick={toggleRecording}
-               disabled={isConnecting}
-               className={`w-20 h-20 rounded-full flex items-center justify-center shadow-lg transition-all duration-300 transform active:scale-95 ${
+               onContextMenu={(e) => e.preventDefault()}
+               onTouchStart={startRecording}
+               onTouchEnd={stopRecording}
+               onTouchCancel={stopRecording}
+               onMouseDown={startRecording}
+               onMouseUp={stopRecording}
+               onMouseLeave={stopRecording}
+               disabled={isProcessing && !isRecording} // Disable only if loading but not recording
+               className={`w-20 h-20 rounded-full flex items-center justify-center shadow-lg transition-all duration-150 transform select-none touch-none ${
                  isRecording 
                    ? 'bg-science-500 shadow-science-500/50 scale-110 ring-4 ring-science-100' 
-                   : 'bg-slate-800 shadow-slate-800/40 hover:bg-slate-700'
-               } ${isConnecting ? 'opacity-75 cursor-not-allowed' : ''}`}
+                   : 'bg-slate-800 shadow-slate-800/40 hover:bg-slate-700 active:scale-95'
+               } ${isProcessing && !isRecording ? 'opacity-75 cursor-not-allowed' : ''}`}
              >
-               {isConnecting ? (
+               {isProcessing && !isRecording ? (
                   <div className="animate-spin rounded-full h-8 w-8 border-2 border-white/30 border-t-white"></div>
                ) : isRecording ? (
                   <Visualizer isActive={true} />
@@ -385,20 +403,22 @@ const App: React.FC = () => {
                   <Mic className="w-8 h-8 text-white" />
                )}
              </button>
-             {isRecording && (
-                <div className="absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap">
-                  <span className="text-[10px] font-bold text-science-600 bg-science-50 px-2 py-0.5 rounded-full animate-pulse">
-                    正在收听...
-                  </span>
-                </div>
-             )}
+             <div className="absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap pointer-events-none">
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full transition-all ${
+                  isRecording 
+                    ? 'text-science-600 bg-science-50 animate-pulse' 
+                    : 'text-slate-400'
+                }`}>
+                  {isRecording ? '松开结束' : isProcessing ? '连接中...' : '长按说话'}
+                </span>
+             </div>
            </div>
 
            {/* Connection Status (Right) */}
            <div className="w-20 flex flex-col items-center justify-center pl-2 border-l border-slate-100">
              <div className={`w-2 h-2 rounded-full mb-1 ${isRecording ? 'bg-green-500 animate-pulse' : 'bg-slate-300'}`} />
              <span className="text-[10px] font-medium text-slate-400">
-               {isConnecting ? '连接中' : isRecording ? '在线' : '就绪'}
+               {isRecording ? '录音中' : '就绪'}
              </span>
            </div>
         </div>

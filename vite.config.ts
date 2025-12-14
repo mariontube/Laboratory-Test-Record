@@ -11,7 +11,7 @@ export default defineConfig(({ mode }) => {
       outDir: 'dist',
     },
     define: {
-      // 关键：将 process.env.API_KEY 注入到前端代码中
+      // 将 API_KEY 注入前端
       'process.env.API_KEY': JSON.stringify(env.API_KEY),
     },
   }
