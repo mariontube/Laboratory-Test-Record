@@ -1,15 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Mic, Plus, History, Activity, FileSpreadsheet, AlertTriangle, ExternalLink, MessageSquareText, FlaskConical } from 'lucide-react';
+import { Plus, History, Activity, FileSpreadsheet, AlertTriangle, Send, Loader2, Keyboard } from 'lucide-react';
 import { LogItem } from './components/LogItem';
-import { Visualizer } from './components/Visualizer';
 import { HistoryModal } from './components/HistoryModal';
-import { GeminiLiveService } from './services/geminiService';
+import { processTextLog } from './services/geminiService';
 import { Experiment, LogEntry, Measurement } from './types';
-
-// Utility to detect WeChat browser
-const isWeChatBrowser = () => {
-  return /MicroMessenger/i.test(navigator.userAgent);
-};
 
 const App: React.FC = () => {
   // State for the current active experiment
@@ -25,20 +19,16 @@ const App: React.FC = () => {
     };
   });
 
-  const [isRecording, setIsRecording] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false); // Used for "Connecting..." state
+  const [inputText, setInputText] = useState('');
+  const [isProcessing, setIsProcessing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   
-  // Real-time transcription state
-  const [liveTranscription, setLiveTranscription] = useState<string>('');
-  const transcriptionTimeoutRef = useRef<number | null>(null);
-
   // History Modal State
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [historyList, setHistoryList] = useState<Experiment[]>([]);
 
-  const geminiServiceRef = useRef<GeminiLiveService | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Auto-save current experiment to 'current_experiment' storage
   useEffect(() => {
@@ -59,6 +49,14 @@ const App: React.FC = () => {
       return () => clearTimeout(timer);
     }
   }, [errorMessage]);
+
+  // Auto-resize textarea
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 120) + 'px';
+    }
+  }, [inputText]);
 
   // Load history list from localStorage
   const loadHistoryList = () => {
@@ -93,38 +91,46 @@ const App: React.FC = () => {
     }
   };
 
-  const handleNewLog = useCallback((data: { description: string; measurements: Omit<Measurement, 'id'>[]; type: string }) => {
-    setExperiment(prev => {
-      const measurementsWithIds: Measurement[] = data.measurements.map(m => ({
-        ...m,
-        id: crypto.randomUUID()
-      }));
+  const handleSendMessage = async () => {
+    if (!inputText.trim() || isProcessing) return;
 
-      const newLog: LogEntry = {
-        id: crypto.randomUUID(),
-        timestamp: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
-        stepNumber: prev.logs.length + 1,
-        description: data.description,
-        measurements: measurementsWithIds,
-        type: data.type as any,
-      };
-      return {
-        ...prev,
-        logs: [...prev.logs, newLog]
-      };
-    });
-    setLiveTranscription('');
-  }, []);
+    setIsProcessing(true);
+    setErrorMessage(null);
 
-  const handleTranscription = useCallback((text: string) => {
-    setLiveTranscription(prev => prev + text);
-    if (transcriptionTimeoutRef.current) {
-      window.clearTimeout(transcriptionTimeoutRef.current);
+    try {
+      const result = await processTextLog(inputText);
+      
+      setExperiment(prev => {
+        const measurementsWithIds: Measurement[] = result.measurements.map(m => ({
+          ...m,
+          id: crypto.randomUUID()
+        }));
+
+        const newLog: LogEntry = {
+          id: crypto.randomUUID(),
+          timestamp: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+          stepNumber: prev.logs.length + 1,
+          description: result.description,
+          measurements: measurementsWithIds,
+          type: result.type as any,
+        };
+        return {
+          ...prev,
+          logs: [...prev.logs, newLog]
+        };
+      });
+      
+      setInputText('');
+      // Reset height
+      if (textareaRef.current) textareaRef.current.style.height = 'auto';
+
+    } catch (e) {
+      console.error(e);
+      setErrorMessage("识别失败，请检查网络或重试");
+    } finally {
+      setIsProcessing(false);
     }
-    transcriptionTimeoutRef.current = window.setTimeout(() => {
-      setLiveTranscription('');
-    }, 5000);
-  }, []);
+  };
 
   const handleUpdateLog = (id: string, updates: Partial<LogEntry>) => {
     setExperiment(prev => ({
@@ -138,60 +144,6 @@ const App: React.FC = () => {
       ...prev,
       logs: prev.logs.filter(log => log.id !== id)
     }));
-  };
-
-  const handleConnectionStatus = useCallback((status: boolean) => {
-    // This callback is less relevant in push-to-talk for "isRecording" state
-    // because we control that manually via press/release.
-    // However, we can use it to clear the "processing" spinner.
-    if (status) {
-      setIsProcessing(false); 
-    }
-  }, []);
-
-  // --- Push to Talk Logic ---
-
-  const startRecording = async (e: React.TouchEvent | React.MouseEvent) => {
-    // Prevent default to stop context menus, text selection, etc.
-    // e.preventDefault(); // Note: Preventing default on touchstart might block scrolling if not careful, but for the button it's fine.
-    
-    if (isRecording || isProcessing) return;
-
-    setErrorMessage(null);
-    setIsRecording(true);
-    setIsProcessing(true); // Show spinner until connected or while initializing
-
-    if (isWeChatBrowser()) {
-       setErrorMessage("微信浏览器可能不兼容。建议点击右上角「在浏览器打开」。");
-    }
-
-    const service = new GeminiLiveService(handleNewLog, handleConnectionStatus, handleTranscription);
-    geminiServiceRef.current = service;
-
-    try {
-      await service.connect();
-      // Connection successful, isProcessing set to false by callback
-    } catch (e) {
-      console.error("Error starting session", e);
-      setIsRecording(false);
-      setIsProcessing(false);
-      setErrorMessage("麦克风连接失败，请检查权限。");
-    }
-  };
-
-  const stopRecording = async (e?: React.TouchEvent | React.MouseEvent | React.FocusEvent) => {
-    if (!isRecording) return;
-    
-    // Slight delay to ensure short utterances are caught? 
-    // No, immediate stop is usually better for UI responsiveness.
-    
-    setIsRecording(false);
-    setIsProcessing(false);
-
-    if (geminiServiceRef.current) {
-      await geminiServiceRef.current.disconnect();
-      geminiServiceRef.current = null;
-    }
   };
 
   const handleNewExperiment = () => {
@@ -307,7 +259,7 @@ const App: React.FC = () => {
       </header>
 
       {/* Main List Area */}
-      <main className="flex-1 overflow-y-auto p-4 space-y-4 pb-48" ref={scrollRef}>
+      <main className="flex-1 overflow-y-auto p-4 space-y-4 pb-4" ref={scrollRef}>
         
         {/* Error Banner */}
         {errorMessage && (
@@ -330,20 +282,14 @@ const App: React.FC = () => {
         </div>
 
         {experiment.logs.length === 0 ? (
-          <div className="h-64 flex flex-col items-center justify-center text-slate-400 opacity-60 animate-pulse-fast">
+          <div className="h-64 flex flex-col items-center justify-center text-slate-400 opacity-60">
             <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mb-6">
-              <Mic className="w-8 h-8 text-slate-300" />
+              <Keyboard className="w-8 h-8 text-slate-300" />
             </div>
-            <p className="font-medium">长按下方按钮说话</p>
+            <p className="font-medium">请输入实验步骤</p>
             <p className="text-xs mt-2 text-slate-300 max-w-[200px] text-center">
-              语音识别已升级。我会自动提取如 "50ml", "37°C" 等关键数据并归类。
+              使用手机输入法自带的语音转文字功能输入，我会自动整理成结构化记录。
             </p>
-            {isWeChatBrowser() && (
-               <div className="mt-8 flex items-center gap-1 text-orange-400 bg-orange-50 px-3 py-1 rounded-full text-[10px]">
-                 <ExternalLink className="w-3 h-3" />
-                 <span>建议在系统浏览器打开</span>
-               </div>
-            )}
           </div>
         ) : (
           experiment.logs.map(log => (
@@ -357,71 +303,33 @@ const App: React.FC = () => {
         )}
       </main>
 
-      {/* Footer / Control Bar */}
-      <div className="flex-none absolute bottom-0 w-full bg-gradient-to-t from-white via-white to-transparent pt-12 pb-6 px-4 safe-area-pb pointer-events-none">
-        
-        {/* Live Transcription Bubble */}
-        {liveTranscription && (
-          <div className="max-w-md mx-auto mb-4 pointer-events-auto animate-fade-in">
-             <div className="bg-slate-800/90 backdrop-blur text-white text-sm p-3 rounded-xl shadow-lg border border-slate-700 flex items-start gap-2">
-                <MessageSquareText className="w-4 h-4 text-science-400 mt-0.5 flex-shrink-0" />
-                <p className="leading-snug opacity-90">{liveTranscription}</p>
-             </div>
-          </div>
-        )}
-
-        <div className="pointer-events-auto bg-white/90 backdrop-blur-md border border-slate-200 shadow-xl rounded-2xl p-2 max-w-md mx-auto flex items-center justify-between">
-           
-           {/* Stats (Left) */}
-           <div className="w-20 flex flex-col items-center justify-center border-r border-slate-100 pr-2">
-             <span className="text-2xl font-bold text-slate-700 leading-none">{experiment.logs.length}</span>
-             <span className="text-[10px] text-slate-400 font-medium uppercase mt-1">记录项</span>
-           </div>
-
-           {/* Main Record Button - Push to Talk */}
-           <div className="-mt-12 relative z-20">
-             <button
-               onContextMenu={(e) => e.preventDefault()}
-               onTouchStart={startRecording}
-               onTouchEnd={stopRecording}
-               onTouchCancel={stopRecording}
-               onMouseDown={startRecording}
-               onMouseUp={stopRecording}
-               onMouseLeave={stopRecording}
-               disabled={isProcessing && !isRecording} // Disable only if loading but not recording
-               className={`w-20 h-20 rounded-full flex items-center justify-center shadow-lg transition-all duration-150 transform select-none touch-none ${
-                 isRecording 
-                   ? 'bg-science-500 shadow-science-500/50 scale-110 ring-4 ring-science-100' 
-                   : 'bg-slate-800 shadow-slate-800/40 hover:bg-slate-700 active:scale-95'
-               } ${isProcessing && !isRecording ? 'opacity-75 cursor-not-allowed' : ''}`}
-             >
-               {isProcessing && !isRecording ? (
-                  <div className="animate-spin rounded-full h-8 w-8 border-2 border-white/30 border-t-white"></div>
-               ) : isRecording ? (
-                  <Visualizer isActive={true} />
+      {/* Input Area */}
+      <div className="flex-none bg-white border-t border-slate-200 p-4 safe-area-pb shadow-[0_-5px_20px_-5px_rgba(0,0,0,0.05)]">
+         <div className="max-w-2xl mx-auto flex items-end gap-2 bg-slate-100 p-2 rounded-2xl border border-slate-200 focus-within:ring-2 focus-within:ring-science-100 focus-within:border-science-400 transition-all">
+            <textarea
+               ref={textareaRef}
+               value={inputText}
+               onChange={(e) => setInputText(e.target.value)}
+               placeholder="输入实验操作，例如：量取 50ml 乙醇倒入烧杯..."
+               className="flex-1 bg-transparent border-none focus:ring-0 text-slate-800 text-base max-h-32 min-h-[40px] py-2 px-1 resize-none placeholder:text-slate-400"
+               rows={1}
+            />
+            <button
+               onClick={handleSendMessage}
+               disabled={!inputText.trim() || isProcessing}
+               className={`p-2.5 rounded-xl flex-shrink-0 transition-all ${
+                  inputText.trim() && !isProcessing
+                   ? 'bg-science-600 text-white shadow-lg shadow-science-200 hover:bg-science-700 active:scale-95' 
+                   : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+               }`}
+            >
+               {isProcessing ? (
+                  <Loader2 className="w-5 h-5 animate-spin" />
                ) : (
-                  <Mic className="w-8 h-8 text-white" />
+                  <Send className="w-5 h-5" />
                )}
-             </button>
-             <div className="absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap pointer-events-none">
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full transition-all ${
-                  isRecording 
-                    ? 'text-science-600 bg-science-50 animate-pulse' 
-                    : 'text-slate-400'
-                }`}>
-                  {isRecording ? '松开结束' : isProcessing ? '连接中...' : '长按说话'}
-                </span>
-             </div>
-           </div>
-
-           {/* Connection Status (Right) */}
-           <div className="w-20 flex flex-col items-center justify-center pl-2 border-l border-slate-100">
-             <div className={`w-2 h-2 rounded-full mb-1 ${isRecording ? 'bg-green-500 animate-pulse' : 'bg-slate-300'}`} />
-             <span className="text-[10px] font-medium text-slate-400">
-               {isRecording ? '录音中' : '就绪'}
-             </span>
-           </div>
-        </div>
+            </button>
+         </div>
       </div>
     </div>
   );
