@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Plus, History, Activity, FileSpreadsheet, AlertTriangle, Send, Loader2, Keyboard } from 'lucide-react';
+import { Plus, History, Activity, FileSpreadsheet, AlertTriangle, Send, Loader2, Keyboard, Cloud, Check } from 'lucide-react';
 import { LogItem } from './components/LogItem';
 import { HistoryModal } from './components/HistoryModal';
 import { processTextLog } from './services/geminiService';
@@ -8,8 +8,12 @@ import { Experiment, LogEntry, Measurement } from './types';
 const App: React.FC = () => {
   // State for the current active experiment
   const [experiment, setExperiment] = useState<Experiment>(() => {
-    const saved = localStorage.getItem('current_experiment');
-    if (saved) return JSON.parse(saved);
+    try {
+      const saved = localStorage.getItem('current_experiment');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error("Failed to restore session", e);
+    }
     return {
       id: crypto.randomUUID(),
       title: '实验记录 ' + new Date().toLocaleDateString('zh-CN'),
@@ -22,6 +26,7 @@ const App: React.FC = () => {
   const [inputText, setInputText] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [lastSavedTime, setLastSavedTime] = useState<Date | null>(null);
   
   // History Modal State
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
@@ -30,9 +35,47 @@ const App: React.FC = () => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Auto-save current experiment to 'current_experiment' storage
+  // Initial load of history
   useEffect(() => {
+    try {
+      const history = JSON.parse(localStorage.getItem('experiment_history') || '[]');
+      setHistoryList(history);
+    } catch (e) {
+      console.error("Failed to load initial history", e);
+    }
+  }, []);
+
+  // CORE PERSISTENCE LOGIC: Auto-save everything on change
+  useEffect(() => {
+    // 1. Always persist the "Current Working Draft"
     localStorage.setItem('current_experiment', JSON.stringify(experiment));
+
+    // 2. Automatically sync to "History List" if it has content
+    // This ensures that even if user closes tab without clicking "New", it's already in history.
+    const hasContent = experiment.logs.length > 0 || !experiment.title.startsWith('实验记录');
+    
+    if (hasContent) {
+      try {
+        const currentHistoryString = localStorage.getItem('experiment_history') || '[]';
+        let currentHistory: Experiment[] = JSON.parse(currentHistoryString);
+        
+        const index = currentHistory.findIndex(h => h.id === experiment.id);
+        
+        if (index >= 0) {
+          // Update existing entry
+          currentHistory[index] = experiment;
+        } else {
+          // Add new entry to the top
+          currentHistory.unshift(experiment);
+        }
+        
+        localStorage.setItem('experiment_history', JSON.stringify(currentHistory));
+        setHistoryList(currentHistory); // Sync UI state
+        setLastSavedTime(new Date());
+      } catch (e) {
+        console.error("Auto-save failed", e);
+      }
+    }
   }, [experiment]);
 
   // Auto-scroll to bottom when logs change
@@ -45,7 +88,7 @@ const App: React.FC = () => {
   // Clear error messages automatically
   useEffect(() => {
     if (errorMessage) {
-      const timer = setTimeout(() => setErrorMessage(null), 8000); // Increased duration for reading
+      const timer = setTimeout(() => setErrorMessage(null), 8000);
       return () => clearTimeout(timer);
     }
   }, [errorMessage]);
@@ -57,39 +100,6 @@ const App: React.FC = () => {
       textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 120) + 'px';
     }
   }, [inputText]);
-
-  // Load history list from localStorage
-  const loadHistoryList = () => {
-    try {
-      const history = JSON.parse(localStorage.getItem('experiment_history') || '[]');
-      setHistoryList(history);
-    } catch (e) {
-      console.error("Failed to load history", e);
-      setHistoryList([]);
-    }
-  };
-
-  // Helper to save an experiment to the history list
-  const saveToHistory = (exp: Experiment) => {
-    // Only save if it has logs or a custom title
-    if (exp.logs.length === 0 && exp.title.startsWith('实验记录')) return;
-
-    try {
-      const history: Experiment[] = JSON.parse(localStorage.getItem('experiment_history') || '[]');
-      const index = history.findIndex(h => h.id === exp.id);
-      
-      if (index >= 0) {
-        history[index] = exp;
-      } else {
-        history.unshift(exp);
-      }
-      
-      localStorage.setItem('experiment_history', JSON.stringify(history));
-      setHistoryList(history);
-    } catch (e) {
-      console.error("Failed to save to history", e);
-    }
-  };
 
   const handleSendMessage = async () => {
     if (!inputText.trim() || isProcessing) return;
@@ -126,7 +136,6 @@ const App: React.FC = () => {
 
     } catch (e: any) {
       console.error(e);
-      // Show the actual error message to help debugging (API key missing, network, etc.)
       setErrorMessage(e.message || "识别失败，请检查网络或重试");
     } finally {
       setIsProcessing(false);
@@ -148,9 +157,9 @@ const App: React.FC = () => {
   };
 
   const handleNewExperiment = () => {
+    // The previous experiment is ALREADY saved by the useEffect, so we can safely switch.
     if (experiment.logs.length > 0) {
-       if (!confirm("开始新实验？当前记录将自动归档到历史记录中。")) return;
-       saveToHistory(experiment);
+       if (!confirm("开始新实验？当前记录已自动保存到历史记录。")) return;
     }
 
     const newExp: Experiment = {
@@ -164,17 +173,10 @@ const App: React.FC = () => {
   };
 
   const handleOpenHistory = () => {
-    if (experiment.logs.length > 0) {
-      saveToHistory(experiment);
-    }
-    loadHistoryList();
     setIsHistoryOpen(true);
   };
 
   const handleSelectHistory = (exp: Experiment) => {
-    if (experiment.id !== exp.id) {
-       saveToHistory(experiment);
-    }
     setExperiment(exp);
     setIsHistoryOpen(false);
   };
@@ -186,6 +188,18 @@ const App: React.FC = () => {
     const newHistory = historyList.filter(h => h.id !== id);
     localStorage.setItem('experiment_history', JSON.stringify(newHistory));
     setHistoryList(newHistory);
+    
+    // If we deleted the current active one, reset to new
+    if (experiment.id === id) {
+        const newExp: Experiment = {
+          id: crypto.randomUUID(),
+          title: '实验记录 ' + new Date().toLocaleString('zh-CN'),
+          logs: [],
+          startTime: new Date().toISOString(),
+          status: 'active'
+        };
+        setExperiment(newExp);
+    }
   };
 
   const handleExportCSV = () => {
@@ -231,7 +245,15 @@ const App: React.FC = () => {
           </div>
           <div>
             <h1 className="text-lg font-bold text-science-900 leading-tight">LabVoice</h1>
-            <p className="text-[10px] text-slate-500 font-mono">{experiment.startTime.split('T')[0]}</p>
+            <div className="flex items-center gap-2">
+              <p className="text-[10px] text-slate-500 font-mono">{experiment.startTime.split('T')[0]}</p>
+              {lastSavedTime && (
+                <div className="flex items-center gap-0.5 text-[10px] text-green-600 bg-green-50 px-1.5 py-0.5 rounded-full animate-fade-in">
+                  <Check className="w-3 h-3" />
+                  <span>已自动保存</span>
+                </div>
+              )}
+            </div>
           </div>
         </div>
         <div className="flex gap-1">
@@ -276,7 +298,6 @@ const App: React.FC = () => {
           <input 
             value={experiment.title}
             onChange={(e) => setExperiment(prev => ({...prev, title: e.target.value}))}
-            onBlur={() => saveToHistory(experiment)} 
             className="text-center bg-transparent text-slate-500 font-medium text-sm focus:outline-none border-b border-transparent focus:border-slate-300 transition-colors w-full"
             placeholder="点击输入实验标题"
           />
