@@ -3,7 +3,9 @@ import { Measurement } from "../types";
 
 const API_KEY = process.env.API_KEY || '';
 
-const ai = new GoogleGenAI({ apiKey: API_KEY });
+// Initialize AI instance only if key exists to prevent immediate crash on load, 
+// but check before usage.
+const ai = API_KEY ? new GoogleGenAI({ apiKey: API_KEY }) : null;
 
 // Define the schema for structured output
 const logSchema = {
@@ -45,7 +47,11 @@ export interface ProcessedLog {
  * Processes raw text input into a structured experiment log using Gemini 2.5 Flash.
  */
 export const processTextLog = async (text: string): Promise<ProcessedLog> => {
-  if (!text.trim()) throw new Error("Input text is empty");
+  if (!API_KEY || !ai) {
+    throw new Error("API Key 未配置。请在 Vercel 项目设置的环境变量中添加 'API_KEY'。");
+  }
+
+  if (!text.trim()) throw new Error("输入内容不能为空");
 
   try {
     const response = await ai.models.generateContent({
@@ -69,11 +75,20 @@ export const processTextLog = async (text: string): Promise<ProcessedLog> => {
     });
 
     const jsonText = response.text;
-    if (!jsonText) throw new Error("AI response was empty");
+    if (!jsonText) throw new Error("AI 未返回任何内容");
     
-    return JSON.parse(jsonText) as ProcessedLog;
-  } catch (error) {
+    // Clean up potential Markdown formatting (```json ... ```) which can break JSON.parse
+    const cleanJson = jsonText.replace(/^```json\s*/, '').replace(/^```\s*/, '').replace(/\s*```$/, '');
+    
+    return JSON.parse(cleanJson) as ProcessedLog;
+  } catch (error: any) {
     console.error("Gemini processing error:", error);
+    
+    // Check for common fetch errors (often caused by network blocks in some regions)
+    if (error.message && (error.message.includes('Failed to fetch') || error.message.includes('NetworkError'))) {
+       throw new Error("网络连接失败。请检查你的网络设置（国内需确保能访问 Google API）。");
+    }
+    
     throw error;
   }
 };

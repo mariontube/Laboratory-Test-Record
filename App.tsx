@@ -45,7 +45,7 @@ const App: React.FC = () => {
   // Clear error messages automatically
   useEffect(() => {
     if (errorMessage) {
-      const timer = setTimeout(() => setErrorMessage(null), 5000);
+      const timer = setTimeout(() => setErrorMessage(null), 8000); // Increased duration for reading
       return () => clearTimeout(timer);
     }
   }, [errorMessage]);
@@ -124,9 +124,10 @@ const App: React.FC = () => {
       // Reset height
       if (textareaRef.current) textareaRef.current.style.height = 'auto';
 
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
-      setErrorMessage("识别失败，请检查网络或重试");
+      // Show the actual error message to help debugging (API key missing, network, etc.)
+      setErrorMessage(e.message || "识别失败，请检查网络或重试");
     } finally {
       setIsProcessing(false);
     }
