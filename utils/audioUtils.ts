@@ -4,7 +4,9 @@ export function createBlob(data: Float32Array): Blob {
   const l = data.length;
   const int16 = new Int16Array(l);
   for (let i = 0; i < l; i++) {
-    int16[i] = data[i] * 32768;
+    // Simple clipping to prevent overflow
+    let s = Math.max(-1, Math.min(1, data[i]));
+    int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
   }
   return {
     data: encode(new Uint8Array(int16.buffer)),
@@ -48,4 +50,37 @@ export async function decodeAudioData(
     }
   }
   return buffer;
+}
+
+/**
+ * Resamples audio data from the source sample rate to a target sample rate (default 16kHz).
+ * Uses linear interpolation for performance.
+ */
+export function resampleTo16k(audioData: Float32Array, originalSampleRate: number): Float32Array {
+  if (originalSampleRate === 16000) return audioData;
+  
+  const targetSampleRate = 16000;
+  const ratio = originalSampleRate / targetSampleRate;
+  const newLength = Math.round(audioData.length / ratio);
+  const result = new Float32Array(newLength);
+  
+  for (let i = 0; i < newLength; i++) {
+    const originalIndex = i * ratio;
+    
+    // Linear interpolation indices
+    const index1 = Math.floor(originalIndex);
+    const index2 = Math.min(Math.ceil(originalIndex), audioData.length - 1);
+    const t = originalIndex - index1;
+    
+    // Check bounds
+    if (index1 >= audioData.length) break;
+    
+    const v1 = audioData[index1];
+    const v2 = audioData[index2];
+    
+    // Interpolate
+    result[i] = v1 * (1 - t) + v2 * t;
+  }
+  
+  return result;
 }

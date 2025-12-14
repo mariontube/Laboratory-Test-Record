@@ -1,5 +1,5 @@
 import { GoogleGenAI, LiveServerMessage, Modality, FunctionDeclaration, Type } from "@google/genai";
-import { createBlob, decode, decodeAudioData } from "../utils/audioUtils";
+import { createBlob, decode, decodeAudioData, resampleTo16k } from "../utils/audioUtils";
 import { Measurement } from "../types";
 
 const API_KEY = process.env.API_KEY || '';
@@ -67,16 +67,26 @@ export class GeminiLiveService {
 
   async connect() {
     this.isConnected = true;
-    this.inputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+    
+    // Initialize AudioContext without forcing sampleRate first. 
+    // Allowing the browser to pick the native hardware rate prevents errors on mobile devices.
+    this.inputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
     this.outputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
     
-    // Ensure Context is running (fixes mobile issues)
+    // Ensure Context is running (fixes mobile issues where context starts suspended)
     if (this.inputAudioContext.state === 'suspended') {
       await this.inputAudioContext.resume();
     }
     
     try {
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1
+        } 
+      });
       
       this.sessionPromise = this.ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-09-2025',
@@ -138,7 +148,14 @@ export class GeminiLiveService {
       if (!this.isConnected) return; // Stop sending data if disconnected
 
       const inputData = e.inputBuffer.getChannelData(0);
-      const pcmBlob = createBlob(inputData);
+      
+      // CRITICAL FIX: Resample audio to 16kHz before sending.
+      // Most browsers/devices run at 44.1kHz or 48kHz, but Gemini Live prefers 16kHz.
+      // Sending raw 48k data while claiming it is 16k results in distorted audio ("chipmunk effect") 
+      // and failure to recognize speech.
+      const resampledData = resampleTo16k(inputData, this.inputAudioContext!.sampleRate);
+      
+      const pcmBlob = createBlob(resampledData);
       
       if (this.sessionPromise) {
         this.sessionPromise.then((session) => {
@@ -222,25 +239,30 @@ export class GeminiLiveService {
       this.mediaStream.getTracks().forEach(track => track.stop());
       this.mediaStream = null;
     }
+    
+    // We do NOT close the inputAudioContext here immediately if we want to reuse it,
+    // but for simplicity and cleanliness we close it and recreate next time.
     if (this.inputAudioContext) {
-       await this.inputAudioContext.close();
+       if (this.inputAudioContext.state !== 'closed') {
+         await this.inputAudioContext.close();
+       }
        this.inputAudioContext = null;
     }
+    
     if (this.outputAudioContext) {
-       await this.outputAudioContext.close();
+       if (this.outputAudioContext.state !== 'closed') {
+         await this.outputAudioContext.close();
+       }
        this.outputAudioContext = null;
     }
 
     // Try to close session gracefully if it exists
     if (this.sessionPromise) {
         try {
-            const session = await this.sessionPromise;
-            // Note: There isn't a direct .close() on the session object in some SDK versions,
-            // but closing the media stream and stopping input usually ends it.
-            // If the SDK supports explicit closing, we would do it here.
-            // Assuming garbage collection handles the rest or the server times out.
+            // Wait for any pending promise
+            await this.sessionPromise;
         } catch(e) {
-            // Ignore errors on close
+            // Ignore errors
         }
         this.sessionPromise = null;
     }
